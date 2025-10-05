@@ -1,0 +1,42 @@
+{
+    "review_period_days": 7,
+    "default_service_level": 0.95,
+    "lead_time": {
+        "avg_days": 10,
+        "std_days": 3
+    },
+    "status_filters": {
+        "count_as_sale": [
+            "DELIVERED"
+        ],
+        "count_as_zero": [],
+        "return_statuses": [
+            "RETURNED",
+            "CANCELLED"
+        ]
+    },
+    "date_format": "auto",
+    "amazon": {
+        "file_path": "data/BusinessReport-04-10-25.csv",
+        "granularity": "sku_summary",
+        "columns": {
+            "date": "day",
+            "sku": "SKU",
+            "qty": "Units Ordered"
+        }
+    },
+    "flipkart": {
+        "file_path": "data/4b7caf22-6416-402f-a94a-ade7e127eccb_1759235470000.xlsx",
+        "granularity": "order_lines",
+        "columns": {
+            "date": "order_date",
+            "order_id": "order_id",
+            "sku": "sku",
+            "qty": "quantity",
+            "status": "order_item_status"
+        }
+    },
+    "outputs": {
+        "daily_consolidated": "exports/daily_sku_sales.csv"
+    }
+}
