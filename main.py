@@ -5,16 +5,13 @@ import os
 from datetime import datetime
 from io import BytesIO
 
-# Import our custom modules
+# Import our modules
 from src import data_loaders, inventory_engine
 
-# Page Config
 st.set_page_config(page_title="Master Inventory Planner", layout="wide", page_icon="📦")
 
-# --- Sidebar: Configuration ---
+# --- Sidebar ---
 st.sidebar.title("⚙️ Settings")
-
-# Load defaults
 try:
     with open("config/settings.json", "r") as f:
         config = json.load(f)
@@ -22,7 +19,6 @@ try:
 except FileNotFoundError:
     defaults = {"sales_period_days": 30, "purchase_period_days": 15, "lead_time_days": 10, "safety_stock_days": 7}
 
-# Inputs
 sales_days = st.sidebar.number_input("Days of Sales Data Uploaded", min_value=1, value=defaults["sales_period_days"])
 purchase_days = st.sidebar.number_input("Days to Cover (Purchase Period)", min_value=1, value=defaults["purchase_period_days"])
 lead_time = st.sidebar.number_input("Supplier Lead Time (Days)", min_value=0, value=defaults["lead_time_days"])
@@ -32,18 +28,23 @@ st.sidebar.markdown("---")
 st.sidebar.info("💡 **Tip:** Update `config/master_product_list.csv` to change pack sizes or suppliers.")
 
 # --- Main UI ---
-st.title("📦 Inventory Purchase Planner")
-st.markdown("Upload your sales reports to generate a Master Purchase Plan based on base unit velocity.")
+st.title("📦 Inventory Purchase Planner (Multi-Channel)")
+st.markdown("Upload Amazon, Flipkart, and Meesho sales to generate a combined purchase plan.")
 
-col1, col2 = st.columns(2)
+# 3 Columns for the 3 Platforms
+col1, col2, col3 = st.columns(3)
 
 with col1:
-    st.subheader("Amazon Business Report")
-    amz_file = st.file_uploader("Upload CSV", type=["csv"], key="amz")
+    st.subheader("1. Amazon")
+    amz_file = st.file_uploader("CSV", type=["csv"], key="amz")
 
 with col2:
-    st.subheader("Flipkart Orders")
-    fk_file = st.file_uploader("Upload Excel", type=["xlsx"], key="fk")
+    st.subheader("2. Flipkart")
+    fk_file = st.file_uploader("Excel", type=["xlsx"], key="fk")
+
+with col3:
+    st.subheader("3. Meesho")
+    meesho_file = st.file_uploader("CSV", type=["csv"], key="meesho")
 
 # Load Master Data
 master_path = "config/master_product_list.csv"
@@ -55,52 +56,55 @@ if os.path.exists(master_path):
     else:
         st.success(f"✅ Master Data Loaded: {len(master_df)} SKUs configured.")
 else:
-    st.warning(f"⚠️ Master Data not found at {master_path}. Please create it.")
+    st.warning(f"⚠️ Master Data not found at {master_path}.")
     st.stop()
 
-# Process
-if amz_file and fk_file:
+# Process Data
+if amz_file or fk_file or meesho_file:
     st.markdown("---")
-    with st.spinner("Processing Sales Data..."):
-        # 1. Load Data
-        amz_df, amz_err = data_loaders.load_amazon_sales(amz_file)
-        fk_df, fk_err = data_loaders.load_flipkart_sales(fk_file)
+    with st.spinner("Merging Platforms & Calculating Demand..."):
+        # Load Files
+        amz_df = fk_df = meesho_df = None
         
-        if amz_err:
-            st.error(amz_err)
-        elif fk_err:
-            st.error(fk_err)
-        else:
-            # 2. Run Engine
-            plan_df, orphans_df = inventory_engine.generate_purchase_plan(
-                amz_df, fk_df, master_df, 
-                sales_days, purchase_days, lead_time, safety_stock
-            )
+        if amz_file:
+            amz_df, err = data_loaders.load_amazon_sales(amz_file)
+            if err: st.error(err)
             
-            # 3. Display KPIs
+        if fk_file:
+            fk_df, err = data_loaders.load_flipkart_sales(fk_file)
+            if err: st.error(err)
+
+        if meesho_file:
+            meesho_df, err = data_loaders.load_meesho_sales(meesho_file)
+            if err: st.error(err)
+
+        # Run Calculation Engine (No Stock File needed now)
+        plan_df, orphans_df = inventory_engine.generate_purchase_plan(
+            amz_df, fk_df, meesho_df, master_df,
+            sales_days, purchase_days, lead_time, safety_stock
+        )
+        
+        if not plan_df.empty:
+            # KPIs
             kpi1, kpi2, kpi3 = st.columns(3)
             total_units = plan_df["total_sold_units"].sum()
-            total_purchase = plan_df["recommended_qty"].sum()
+            total_rec = plan_df["recommended_qty"].sum()
             
             kpi1.metric("Total Base Units Sold", f"{total_units:,.0f}")
-            kpi2.metric("Total Units to Buy", f"{total_purchase:,.0f}")
+            kpi2.metric("Recommended Purchase Qty", f"{total_rec:,.0f}")
             kpi3.metric("Unique Products", len(plan_df))
             
-            # 4. Display Plan
+            # Display Table
             st.subheader("📋 Purchase Recommendation")
-            
-            # Category Filter
             cats = ["All"] + sorted(list(plan_df["category"].unique()))
             selected_cat = st.selectbox("Filter by Category", cats)
             
-            if selected_cat != "All":
-                display_df = plan_df[plan_df["category"] == selected_cat]
-            else:
-                display_df = plan_df
+            display_df = plan_df if selected_cat == "All" else plan_df[plan_df["category"] == selected_cat]
             
+            # Highlight high quantity rows
             st.dataframe(display_df.style.background_gradient(subset=['recommended_qty'], cmap='Greens'), use_container_width=True)
             
-            # 5. Download
+            # Download Button
             output = BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 plan_df.to_excel(writer, index=False, sheet_name='Purchase Plan')
@@ -114,8 +118,9 @@ if amz_file and fk_file:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             
-            # 6. Warning for Orphans
+            # Orphan Warning
             if not orphans_df.empty:
-                with st.expander("⚠️ Unknown SKUs Found (Action Required)"):
-                    st.write("These SKUs were found in your sales data but are MISSING from `master_product_list.csv`. They defaulted to Pack Qty = 1.")
+                with st.expander("⚠️ Unknown SKUs Found (Check Master List)"):
                     st.dataframe(orphans_df)
+        else:
+            st.warning("No valid sales data found in the uploaded files.")

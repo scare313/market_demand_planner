@@ -17,16 +17,23 @@ def load_master_data(filepath):
     except Exception as e:
         return None, str(e)
 
-def generate_purchase_plan(amazon_df, flipkart_df, master_df, sales_days, purchase_days, lead_time, safety_stock_days):
+def generate_purchase_plan(amazon_df, flipkart_df, meesho_df, master_df, sales_days, purchase_days, lead_time, safety_stock_days):
     """
-    1. Merges Sales Data
+    1. Merges Sales Data (Amazon + Flipkart + Meesho)
     2. Maps to Master Data (Base SKU & Pack Qty)
     3. Calculates Daily Velocity (ADS)
     4. Computes Reorder Point logic
     """
     
     # 1. Combine Sales
-    sales_data = pd.concat([amazon_df, flipkart_df], ignore_index=True)
+    # We filter out None or Empty dataframes to prevent errors if a file wasn't uploaded
+    dfs_to_merge = [df for df in [amazon_df, flipkart_df, meesho_df] if df is not None and not df.empty]
+    
+    if not dfs_to_merge:
+        # Return empty structures if no data is available
+        return pd.DataFrame(), pd.DataFrame()
+
+    sales_data = pd.concat(dfs_to_merge, ignore_index=True)
     
     # 2. Merge with Master Data
     # Left join ensures we keep sales data even if it's missing from Master (so we can show orphans)
@@ -75,8 +82,6 @@ def generate_purchase_plan(amazon_df, flipkart_df, master_df, sales_days, purcha
     
     # Gross Requirement (Simplified Reorder Formula)
     # Total Needed = Cycle Stock + Safety Stock + Lead Time Demand
-    # Note: In a real system, you subtract 'Current Stock'. Since we don't have that input,
-    # this is the "Gross Requirement" to support sales.
     plan["recommended_qty"] = (plan["cycle_stock"] + plan["safety_stock"] + plan["lead_time_demand"]).round().astype(int)
     
     # Cleanup for Display

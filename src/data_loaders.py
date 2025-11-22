@@ -13,10 +13,8 @@ def load_amazon_sales(uploaded_file):
     try:
         df = pd.read_csv(uploaded_file)
         
-        # Standardize headers (strip spaces)
         df.columns = [c.strip() for c in df.columns]
         
-        # Rename known columns
         col_map = {
             "SKU": "sku",
             "Units Ordered": "qty",
@@ -25,13 +23,10 @@ def load_amazon_sales(uploaded_file):
         }
         df = df.rename(columns=col_map)
         
-        # Validation
         if "sku" not in df.columns or "qty" not in df.columns:
             return None, "Amazon file missing 'SKU' or 'Units Ordered' columns."
 
-        # Clean Data
         df["sku"] = df["sku"].apply(clean_sku)
-        # Remove commas from numbers (e.g., "1,000" -> 1000)
         df["qty"] = pd.to_numeric(df["qty"].astype(str).str.replace(",", ""), errors='coerce').fillna(0)
         
         df["platform"] = "Amazon"
@@ -46,7 +41,6 @@ def load_flipkart_sales(uploaded_file):
         df = pd.read_excel(uploaded_file, sheet_name="Orders", engine="openpyxl")
         df.columns = [c.strip() for c in df.columns]
         
-        # Mapping
         col_map = {
             "sku": "sku",
             "quantity": "qty",
@@ -54,23 +48,16 @@ def load_flipkart_sales(uploaded_file):
         }
         df = df.rename(columns=col_map)
 
-        # Regex Extraction for messy Flipkart SKUs (e.g. "Tax:18% SKU:ABC-123")
         def extract_flipkart_sku(raw_val):
             raw_val = str(raw_val)
             match = re.search(r'SKU:([^"]+)', raw_val)
             if match:
                 return match.group(1)
-            return raw_val # Fallback
+            return raw_val
 
         df["sku"] = df["sku"].apply(extract_flipkart_sku).apply(clean_sku)
         df["qty"] = pd.to_numeric(df["qty"], errors='coerce').fillna(0)
         
-        # Filter Returns/Cancellations
-        # Net Sales = Delivered - (Returned + Cancelled)
-        # Note: This logic assumes the report contains ALL status rows for the period.
-        # If you only want positive sales, filter for 'DELIVERED'.
-        # Adjusting to your previous logic: Only count valid sales?
-        # Let's stick to: Count sales, ignore cancellations for Replenishment demand (usually safer).
         valid_statuses = ["DELIVERED", "SHIPPED", "APPROVED", "PACKED"]
         df = df[df["status"].isin(valid_statuses)]
         
@@ -79,3 +66,58 @@ def load_flipkart_sales(uploaded_file):
 
     except Exception as e:
         return None, f"Error reading Flipkart file: {str(e)}"
+
+def load_meesho_sales(uploaded_file):
+    """Parses Meesho Orders CSV."""
+    try:
+        df = pd.read_csv(uploaded_file)
+        df.columns = [c.strip() for c in df.columns]
+        
+        # Mapping based on your file structure
+        col_map = {
+            "SKU": "sku",
+            "Quantity": "qty",
+            "Reason for Credit Entry": "status"
+        }
+        df = df.rename(columns=col_map)
+        
+        if "sku" not in df.columns or "qty" not in df.columns:
+            return None, "Meesho file missing 'SKU' or 'Quantity' columns."
+
+        df["sku"] = df["sku"].apply(clean_sku)
+        df["qty"] = pd.to_numeric(df["qty"], errors='coerce').fillna(0)
+        
+        # We include all rows (Delivered & RTO) as 'Demand'. 
+        # If you want to exclude RTOs later, we can filter by 'status' here.
+        
+        df["platform"] = "Meesho"
+        return df[["sku", "qty", "platform"]], None
+        
+    except Exception as e:
+        return None, f"Error reading Meesho file: {str(e)}"
+
+def load_stock_levels(uploaded_file):
+    """Parses Current Stock Levels (CSV or Excel)."""
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file)
+        else:
+            df = pd.read_excel(uploaded_file)
+        
+        df.columns = [c.strip().lower() for c in df.columns]
+        
+        sku_col = next((c for c in df.columns if 'sku' in c), None)
+        qty_col = next((c for c in df.columns if 'qty' in c or 'stock' in c), None)
+        
+        if not sku_col or not qty_col:
+            return None, "Stock file must have 'sku' and 'qty' columns."
+            
+        df = df.rename(columns={sku_col: "internal_sku", qty_col: "stock_on_hand"})
+        
+        df["internal_sku"] = df["internal_sku"].apply(clean_sku)
+        df["stock_on_hand"] = pd.to_numeric(df["stock_on_hand"], errors='coerce').fillna(0)
+        
+        return df[["internal_sku", "stock_on_hand"]], None
+
+    except Exception as e:
+        return None, f"Error reading Stock file: {str(e)}"
