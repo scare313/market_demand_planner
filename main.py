@@ -1,205 +1,126 @@
 import streamlit as st
 import pandas as pd
 import json
-import re
+import os
 from datetime import datetime
 from io import BytesIO
 
-# --- Configs ---
-CATEGORY_MAP = {
-    "L-CAP": "CAP",
-    "CAP": "CAP",
-    "MASK": "MASK",
-    "BANDANA": "BANDANA",
-    "PLANTER": "PLANTER"
-}
+# Import our modules
+from src import data_loaders, inventory_engine
 
-def get_category(sku: str) -> str:
-    # Match longest prefix first (so L-CAP wins over CAP)
-    for prefix in sorted(CATEGORY_MAP.keys(), key=lambda x: -len(x)):
-        if sku.startswith(prefix):
-            return CATEGORY_MAP[prefix]
-    return sku.split('-')[0]
+st.set_page_config(page_title="Master Inventory Planner", layout="wide", page_icon="📦")
 
-def _to_int(val, default=1) -> int:
-    try:
-        return int(float(val))
-    except Exception:
-        return default
-
-def get_multiplier(sku: str, multipliers: dict) -> int:
-    # Exact match
-    if sku in multipliers:
-        return _to_int(multipliers[sku], 1)
-    # Pattern match if key is contained anywhere in SKU
-    for key, val in multipliers.items():
-        if key in sku:
-            return _to_int(val, 1)
-    return 1
-
-def base_sku(sku: str) -> str:
-    # Strip pack suffixes at END only
-    return re.sub(r'(-P\d+|-PACKOF\d+|-PO\d+|-\d+)$', '', sku)
-
-def process_sales(amazon_df: pd.DataFrame,
-                  flipkart_df: pd.DataFrame,
-                  multipliers: dict,
-                  sales_days: int,
-                  purchase_days: int) -> pd.DataFrame:
-    combined_df = pd.concat([amazon_df, flipkart_df], ignore_index=True)
-
-    # Normalize SKU & force qty numeric (defensive)
-    combined_df["sku"] = combined_df["sku"].astype(str).str.strip().str.upper()
-    combined_df["qty"] = pd.to_numeric(combined_df["qty"], errors="coerce").fillna(0.0)
-
-    # Vectorized multiplier lookup
-    mult_series = combined_df["sku"].map(lambda s: get_multiplier(s, multipliers)).astype(float)
-    combined_df["multiplied_qty"] = (combined_df["qty"].astype(float) * mult_series).astype(float)
-
-    # Base SKU & category
-    combined_df["base_sku"] = combined_df["sku"].apply(base_sku)
-    combined_df["category"] = combined_df["base_sku"].map(get_category)
-
-    # Aggregate
-    sku_sales = (
-        combined_df.groupby("base_sku", as_index=False)["multiplied_qty"]
-        .sum(min_count=1)
-        .rename(columns={"base_sku": "sku", "multiplied_qty": "qty"})
-    )
-
-    # Attach category consistently
-    base_to_cat = combined_df.drop_duplicates("base_sku").set_index("base_sku")["category"]
-    sku_sales["category"] = sku_sales["sku"].map(base_to_cat)
-
-    # Recommendation = (qty / sales_days) * purchase_days
-    sku_sales["recommended_purchase_qty"] = (
-        (sku_sales["qty"].astype(float) / float(sales_days)) * float(purchase_days)
-    ).round().astype(int)
-
-    # Optional: whole unit qty
-    sku_sales["qty"] = sku_sales["qty"].round().astype(int)
-
-    # Order columns
-    return sku_sales[["sku", "category", "qty", "recommended_purchase_qty"]]
-
-# --- Streamlit UI ---
-st.set_page_config(page_title="Inventory Estimator", layout="centered")
-st.title("🛒 Inventory Purchase Estimator")
-
-# Cache for user inputs
-if "last_sales_days" not in st.session_state:
-    st.session_state.last_sales_days = 30
-if "last_purchase_days" not in st.session_state:
-    st.session_state.last_purchase_days = 15
-if "last_output_name" not in st.session_state:
-    st.session_state.last_output_name = "purchase_plan.xlsx"
-if "last_category" not in st.session_state:
-    st.session_state.last_category = "All Categories"
-
-# File uploaders
-amazon_file = st.file_uploader("Upload Amazon Sales CSV", type=["csv"])
-flipkart_file = st.file_uploader("Upload Flipkart Orders Excel", type=["xlsx"])
-
-# User inputs
-sales_days = st.number_input(
-    "How many days of sales data did you upload?", min_value=1, max_value=365,
-    value=st.session_state.last_sales_days
-)
-purchase_days = st.number_input(
-    "For how many days do you want to purchase inventory?", min_value=1, max_value=365,
-    value=st.session_state.last_purchase_days
-)
-output_name = st.text_input("Output file name (Excel):", value=st.session_state.last_output_name)
-
-# Load multipliers config
-multipliers = {}
+# --- Sidebar ---
+st.sidebar.title("⚙️ Settings")
 try:
-    with open("config/sku_multipliers.json") as f:
-        multipliers = json.load(f)
-except Exception:
-    st.warning("Could not load config/sku_multipliers.json. All multipliers will default to 1.")
+    with open("config/settings.json", "r") as f:
+        config = json.load(f)
+        defaults = config.get("defaults", {})
+except FileNotFoundError:
+    defaults = {"sales_period_days": 30, "purchase_period_days": 15, "lead_time_days": 10, "safety_stock_days": 7}
 
-if amazon_file and flipkart_file:
-    # ---------- Amazon ----------
-    amazon_df = pd.read_csv(amazon_file)
-    amazon_df = amazon_df.rename(columns=lambda x: str(x).strip())
-    amazon_df = amazon_df.rename(columns={
-        "SKU": "sku",
-        "Units Ordered": "qty",
-    })
-    # Normalize SKU & qty (remove thousands separators)
-    amazon_df["sku"] = amazon_df["sku"].astype(str).str.strip().str.upper()
-    amazon_df["qty"] = pd.to_numeric(
-        amazon_df["qty"].astype(str).str.replace(",", "", regex=False).str.strip(),
-        errors="coerce"
-    ).fillna(0.0)
+sales_days = st.sidebar.number_input("Days of Sales Data Uploaded", min_value=1, value=defaults["sales_period_days"])
+purchase_days = st.sidebar.number_input("Days to Cover (Purchase Period)", min_value=1, value=defaults["purchase_period_days"])
+lead_time = st.sidebar.number_input("Supplier Lead Time (Days)", min_value=0, value=defaults["lead_time_days"])
+safety_stock = st.sidebar.number_input("Safety Stock Buffer (Days)", min_value=0, value=defaults["safety_stock_days"])
 
-    amazon_df["platform"] = "amazon"
-    amazon_df["day"] = datetime.today().date()
-    amazon_df = amazon_df[["sku", "qty", "platform", "day"]]
+st.sidebar.markdown("---")
+st.sidebar.info("💡 **Tip:** Update `config/master_product_list.csv` to change pack sizes or suppliers.")
 
-    # ---------- Flipkart ----------
-    flipkart_df = pd.read_excel(flipkart_file, sheet_name="Orders", engine="openpyxl")
-    flipkart_df = flipkart_df.rename(columns=lambda x: str(x).strip())
-    # Adjust these if your Flipkart column names differ
-    flipkart_df = flipkart_df.rename(columns={
-        "sku": "sku",
-        "quantity": "quantity",
-        "order_item_status": "order_item_status",
-        "order_date": "order_date",
-    })
-    # Extract true SKU if embedded like: ... SKU:"ABC-123" ...
-    extracted = flipkart_df["sku"].astype(str).str.extract(r'SKU:([^"]+)')[0]
-    flipkart_df["sku"] = extracted.fillna(flipkart_df["sku"]).astype(str).str.strip().str.upper()
+# --- Main UI ---
+st.title("📦 Inventory Purchase Planner (Multi-Channel)")
+st.markdown("Upload Amazon, Flipkart, and Meesho sales to generate a combined purchase plan.")
 
-    flipkart_df["quantity"] = pd.to_numeric(flipkart_df["quantity"], errors="coerce").fillna(0.0)
-    flipkart_df["order_date"] = pd.to_datetime(flipkart_df["order_date"], errors="coerce").dt.date
+# 3 Columns for the 3 Platforms
+col1, col2, col3 = st.columns(3)
 
-    def flipkart_qty(row):
-        if row["order_item_status"] == "DELIVERED":
-            return row["quantity"]
-        elif row["order_item_status"] in ["RETURNED", "CANCELLED"]:
-            return -row["quantity"]
-        else:
-            return 0.0
+with col1:
+    st.subheader("1. Amazon")
+    amz_file = st.file_uploader("CSV", type=["csv"], key="amz")
 
-    flipkart_df["qty"] = flipkart_df.apply(flipkart_qty, axis=1)
-    flipkart_df = flipkart_df[flipkart_df["qty"] != 0]
-    flipkart_df["platform"] = "flipkart"
-    flipkart_df = flipkart_df.rename(columns={"order_date": "day"})
-    flipkart_df = flipkart_df[["sku", "qty", "platform", "day"]]
+with col2:
+    st.subheader("2. Flipkart")
+    fk_file = st.file_uploader("Excel", type=["xlsx"], key="fk")
 
-    # ---------- Process ----------
-    sku_sales = process_sales(amazon_df, flipkart_df, multipliers, sales_days, purchase_days)
+with col3:
+    st.subheader("3. Meesho")
+    meesho_file = st.file_uploader("CSV", type=["csv"], key="meesho")
 
-    # ---------- Category dropdown filter ----------
-    categories = ["All Categories"] + sorted(c for c in sku_sales["category"].dropna().unique())
-    selected_category = st.selectbox("Filter by category", categories, index=categories.index(st.session_state.last_category) if st.session_state.last_category in categories else 0)
-
-    if selected_category != "All Categories":
-        filtered = sku_sales[sku_sales["category"] == selected_category].copy()
+# Load Master Data
+master_path = "config/master_product_list.csv"
+if os.path.exists(master_path):
+    master_df, err = inventory_engine.load_master_data(master_path)
+    if err:
+        st.error(f"Error loading Master Data: {err}")
+        st.stop()
     else:
-        filtered = sku_sales.copy()
-
-    st.success(f"Processing complete! Showing {len(filtered)} SKU(s).")
-    st.dataframe(filtered[["sku", "category", "qty", "recommended_purchase_qty"]])
-
-    # Download as Excel (filtered)
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        filtered.to_excel(writer, index=False, sheet_name='PurchasePlan')
-    st.download_button(
-        label="Download Excel",
-        data=output.getvalue(),
-        file_name=output_name,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-    # Persist last-used values
-    st.session_state.last_sales_days = int(sales_days)
-    st.session_state.last_purchase_days = int(purchase_days)
-    st.session_state.last_output_name = output_name
-    st.session_state.last_category = selected_category
-
+        st.success(f"✅ Master Data Loaded: {len(master_df)} SKUs configured.")
 else:
-    st.info("Please upload both Amazon and Flipkart files to continue.")
+    st.warning(f"⚠️ Master Data not found at {master_path}.")
+    st.stop()
+
+# Process Data
+if amz_file or fk_file or meesho_file:
+    st.markdown("---")
+    with st.spinner("Merging Platforms & Calculating Demand..."):
+        # Load Files
+        amz_df = fk_df = meesho_df = None
+        
+        if amz_file:
+            amz_df, err = data_loaders.load_amazon_sales(amz_file)
+            if err: st.error(err)
+            
+        if fk_file:
+            fk_df, err = data_loaders.load_flipkart_sales(fk_file)
+            if err: st.error(err)
+
+        if meesho_file:
+            meesho_df, err = data_loaders.load_meesho_sales(meesho_file)
+            if err: st.error(err)
+
+        # Run Calculation Engine (No Stock File needed now)
+        plan_df, orphans_df = inventory_engine.generate_purchase_plan(
+            amz_df, fk_df, meesho_df, master_df,
+            sales_days, purchase_days, lead_time, safety_stock
+        )
+        
+        if not plan_df.empty:
+            # KPIs
+            kpi1, kpi2, kpi3 = st.columns(3)
+            total_units = plan_df["total_sold_units"].sum()
+            total_rec = plan_df["recommended_qty"].sum()
+            
+            kpi1.metric("Total Base Units Sold", f"{total_units:,.0f}")
+            kpi2.metric("Recommended Purchase Qty", f"{total_rec:,.0f}")
+            kpi3.metric("Unique Products", len(plan_df))
+            
+            # Display Table
+            st.subheader("📋 Purchase Recommendation")
+            cats = ["All"] + sorted(list(plan_df["category"].unique()))
+            selected_cat = st.selectbox("Filter by Category", cats)
+            
+            display_df = plan_df if selected_cat == "All" else plan_df[plan_df["category"] == selected_cat]
+            
+            # Highlight high quantity rows
+            st.dataframe(display_df.style.background_gradient(subset=['recommended_qty'], cmap='Greens'), use_container_width=True)
+            
+            # Download Button
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                plan_df.to_excel(writer, index=False, sheet_name='Purchase Plan')
+                if not orphans_df.empty:
+                    orphans_df.to_excel(writer, index=False, sheet_name='Unknown SKUs')
+                
+            st.download_button(
+                label="📥 Download Purchase Plan (Excel)",
+                data=output.getvalue(),
+                file_name=f"Purchase_Plan_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            
+            # Orphan Warning
+            if not orphans_df.empty:
+                with st.expander("⚠️ Unknown SKUs Found (Check Master List)"):
+                    st.dataframe(orphans_df)
+        else:
+            st.warning("No valid sales data found in the uploaded files.")
