@@ -15,7 +15,24 @@ An intelligent inventory forecasting tool designed for e-commerce sellers managi
 📂 Project Structure
 --------------------
 Ensure your folder looks like this:
-Plain textANTLR4BashCC#CSSCoffeeScriptCMakeDartDjangoDockerEJSErlangGitGoGraphQLGroovyHTMLJavaJavaScriptJSONJSXKotlinLaTeXLessLuaMakefileMarkdownMATLABMarkupObjective-CPerlPHPPowerShell.propertiesProtocol BuffersPythonRRubySass (Sass)Sass (Scss)SchemeSQLShellSwiftSVGTSXTypeScriptWebAssemblyYAMLXML`   Inventory_Planner/  │  ├── main.py                   # The App Interface (Streamlit)  ├── start_mdp.bat             # Double-click to run  │  ├── config/  │   ├── master_product_list.csv   # SOURCE OF TRUTH (You edit this)  │   └── settings.json             # Default app settings  │  ├── src/  │   ├── __init__.py  │   ├── data_loaders.py       # Logic to parse platform files  │   └── inventory_engine.py   # The math engine  │  └── exports/                  # Generated Excel plans save here   `
+Plain textANTLR4BashCC#CSSCoffeeScriptCMakeDartDjangoDockerEJSErlangGitGoGraphQLGroovyHTMLJavaJavaScriptJSONJSXKotlinLaTeXLessLuaMakefileMarkdownMATLABMarkupObjective-CPerlPHPPowerShell.propertiesProtocol BuffersPythonRRubySass (Sass)Sass (Scss)SchemeSQLShellSwiftSVGTSXTypeScriptWebAssemblyYAMLXML`  ```
+Inventory_Planner/
+│
+├── main.py                   # The App Interface (Streamlit)
+├── start_mdp.bat             # Double-click to run
+│
+├── config/
+│   ├── master_product_list.csv   # SOURCE OF TRUTH (You edit this)
+│   └── settings.json             # Default app settings
+│
+├── src/
+│   ├── __init__.py
+│   ├── data_loaders.py       # Logic to parse platform files
+│   └── inventory_engine.py   # The math engine
+│
+└── exports/                  # Generated Excel plans save here
+
+````
 
 🛠️ Setup Guide
 ---------------
